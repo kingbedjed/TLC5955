@@ -31,6 +31,19 @@
 #include <SPI.h>
 #include <Arduino.h>
 
+/* Bit Quantities (Change to match other TLC driver chips) */
+#define GS_BITS 16
+#define MC_BITS 3
+#define BC_BITS 7
+#define DC_BITS 7
+#define FC_BITS 5
+#define CONTROL_ZERO_BITS 389   /* Bits required for correct control reg size */
+#define TOTAL_REGISTER_SIZE 76
+#define LATCH_DELAY 1
+#define CONTROL_WRITE_COUNT 2
+#define CONTROL_MODE_ON 1
+#define CONTROL_MODE_OFF 0
+
 void TLC5955::init(uint8_t gslat, uint8_t spi_mosi, uint8_t spi_clk, uint8_t gsclk)
 {
 
@@ -191,7 +204,7 @@ void TLC5955::setControlModeBit(bool is_control_mode)
 
 int TLC5955::updateLeds(double* output_current)
 {
-
+  uint8_t color_channel_ordered;
   double power_output_amps = getTotalCurrent();
   if (output_current != nullptr)
   {
@@ -211,15 +224,14 @@ int TLC5955::updateLeds(double* output_current)
   {
     setControlModeBit(CONTROL_MODE_OFF);
     SPI.beginTransaction(mSettings);
-    uint8_t color_channel_ordered;
     for (int8_t led_channel_index = (int8_t)LEDS_PER_CHIP - 1; led_channel_index >= 0; led_channel_index--)
     {
       for (int8_t color_channel_index = (int8_t)COLOR_CHANNEL_COUNT - 1; color_channel_index >= 0; color_channel_index--)
       {
         color_channel_ordered = _rgb_order[chip][led_channel_index][(uint8_t) color_channel_index];
-
-        SPI.transfer((char)(_grayscale_data[chip][led_channel_index][color_channel_ordered] >> 8)); // Output MSB first
-        SPI.transfer((char)(_grayscale_data[chip][led_channel_index][color_channel_ordered] & 0xFF)); // Followed by LSB
+        SPI.transfer16(
+            _grayscale_data[chip][led_channel_index][color_channel_ordered]
+        );
       }
     }
     SPI.endTransaction();
@@ -234,13 +246,12 @@ void TLC5955::clearLeds()
     for (int16_t chip = (int8_t)_tlc_count - 1; chip >= 0; chip--)
   {
     setControlModeBit(CONTROL_MODE_OFF);
-    SPI.beginTransaction(SPISettings(spi_baud_rate, MSBFIRST, SPI_MODE0));
+    SPI.beginTransaction(mSettings);
     for (int8_t led_channel_index = (int8_t)LEDS_PER_CHIP - 1; led_channel_index >= 0; led_channel_index--)
     {
       for (int8_t color_channel_index = (int8_t)COLOR_CHANNEL_COUNT - 1; color_channel_index >= 0; color_channel_index--)
       {
-        SPI.transfer((char) (uint16_t) 0); // Output MSB first
-        SPI.transfer((char) (uint16_t) 0); // Followed by LSB
+        SPI.transfer16(0);
       }
     }
     SPI.endTransaction();
@@ -325,17 +336,26 @@ void TLC5955::setFunctionData(bool DSPRPT, bool TMGRST, bool RFRESH, bool ESPWM,
 
 double TLC5955::getTotalCurrent()
 {
-  double totalCurrent = 0;
+  uint32_t totalCurrent_channel[COLOR_CHANNEL_COUNT];
+  for (uint8_t color_channel_index = 0; color_channel_index < COLOR_CHANNEL_COUNT; color_channel_index++)
+      totalCurrent_channel[color_channel_index] = 0;
+
   for (uint8_t color_channel_index = 0; color_channel_index < COLOR_CHANNEL_COUNT; color_channel_index++)
   {
-    // https://www.ti.com/lit/ds/symlink/tlc5955.pdf?ts=1636036806528&ref_url=https%253A%252F%252Fwww.google.com%252F
-    // Page 17 (Equation 1)
+    for (uint8_t chip = 0; chip < _tlc_count; chip++)
+      for (uint8_t led_channel_index = 0; led_channel_index < LEDS_PER_CHIP; led_channel_index++)
+        totalCurrent_channel[color_channel_index] += _grayscale_data[chip][led_channel_index][color_channel_index];
+  }
+  // Avoid expensive floating point computation and compute the totalCurrent
+  // once, after the inexpensive integer computation has been done
+  // https://www.ti.com/lit/ds/symlink/tlc5955.pdf
+  // Page 17 (Equation 1)
+  double totalCurrent = 0;
+  for (uint8_t color_channel_index = 0; color_channel_index < COLOR_CHANNEL_COUNT; color_channel_index++){
     double current = maxCurrentValues[_MC[color_channel_index]]
                     * (0.1 + 0.9 * _BC[color_channel_index] / 127)
                     * (0.262 + 0.738 * _DC[color_channel_index] / 127);
-    for (uint8_t chip = 0; chip < _tlc_count; chip++)
-      for (uint8_t led_channel_index = 0; led_channel_index < LEDS_PER_CHIP; led_channel_index++)
-        totalCurrent += current * _grayscale_data[chip][led_channel_index][color_channel_index] / 65535;
+    totalCurrent += totalCurrent_channel[color_channel_index] * current / (0xFFFF);
   }
   return totalCurrent;
 }
