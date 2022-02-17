@@ -162,15 +162,6 @@ void TLC5955::setAllLedRgb(uint16_t red, uint16_t green, uint16_t blue)
   }
 }
 
-void TLC5955::flushBuffer()
-{
-  setControlModeBit(CONTROL_MODE_OFF);
-  SPI.beginTransaction(mSettings);
-  for (int16_t fCount = 0; fCount < _tlc_count * TOTAL_REGISTER_SIZE / 8; fCount++)
-    SPI.transfer(0);
-  SPI.endTransaction();
-}
-
 void TLC5955::setControlModeBit(bool is_control_mode)
 {
   // Make sure latch is low
@@ -448,14 +439,6 @@ void TLC5955::getDotCorrection(uint8_t* dotCorrection)
 void TLC5955::updateControl()
 {
   ssize_t a;
-#if (TLC5955_COLOR_CHANNEL_COUNT == 3)
-  // Highly optimized for 3 channel count
-  uint16_t dc0, dc1, dc2;
-
-  dc0 = (_DC[2] << 7) | (_DC[1] << 0);
-  dc1 = (_DC[0] << 7) | (_DC[2] << 0);
-  dc2 = (_DC[1] << 7) | (_DC[0] << 0);
-#endif
   for (int8_t repeatCtr = 0; repeatCtr < CONTROL_WRITE_COUNT; repeatCtr++)
   {
     for (int8_t chip = _tlc_count - 1; chip >= 0; chip--)
@@ -497,14 +480,6 @@ void TLC5955::updateControl()
         setBuffer((_MC[0] & (1 << a)));
 
       // Dot Correction Data
-#if (TLC5955_COLOR_CHANNEL_COUNT == 3)
-      for (a = 0; a < LEDS_PER_CHIP / 2; a ++){
-          SPI.transfer(dc0);
-          SPI.transfer(dc1);
-          SPI.transfer(dc2);
-      }
-#else
-#warning Not using optimized dot correction settings
       for (a = LEDS_PER_CHIP - 1; a >= 0; a--)
       {
         for (int8_t b = COLOR_CHANNEL_COUNT - 1; b >= 0; b--)
@@ -513,7 +488,6 @@ void TLC5955::updateControl()
             setBuffer(_DC[b] & (1 << c));
         }
       }
-#endif
       SPI.endTransaction();
     }
     latch();
