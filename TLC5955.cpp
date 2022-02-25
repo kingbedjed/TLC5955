@@ -31,20 +31,6 @@
 #include <SPI.h>
 #include <Arduino.h>
 
-/* Bit Quantities (Change to match other TLC driver chips) */
-#define GS_BITS 16
-#define MC_BITS 3
-#define BC_BITS 7
-#define DC_BITS 7
-#define FC_BITS 5
-#define CONTROL_ZERO_BITS 389   /* Bits required for correct control reg size */
-#define TOTAL_REGISTER_SIZE 76
-#define LATCH_DELAY 1
-#define CONTROL_WRITE_COUNT 1
-#define CONTROL_MODE_ON 1
-#define CONTROL_MODE_OFF 0
-
-
 void TLC5955::init(uint8_t gslat, uint8_t spi_mosi, uint8_t spi_clk, uint8_t gsclk)
 {
 
@@ -65,9 +51,7 @@ void TLC5955::init(uint8_t gslat, uint8_t spi_mosi, uint8_t spi_clk, uint8_t gsc
 
   // set up gsclk
   pinMode(_gsclk, OUTPUT);
-  // Do not write the gsclk frequency here. The system isn't fully setup
-  // and there will be a flash of white light
-  // setGsclkFreq(gsclk_frequency);
+  setGsclkFreq(gsclk_frequency);
 
   // Set default color channel indicies
   setRgbPinOrder(rgb_order_default[0], rgb_order_default[1], rgb_order_default[2]);
@@ -179,21 +163,26 @@ void TLC5955::setControlModeBit(bool is_control_mode)
   {
     // Manually Write control sequence
     digitalWrite(_spi_mosi, HIGH);          // Set MSB to HIGH
+    digitalWrite(_spi_clk, LOW);                  // Clock
+    // Pulse
+    digitalWrite(_spi_clk, HIGH);
+    digitalWrite(_spi_clk, LOW);
+    // see datasheet HLLHLHHL
+    shiftOut(_spi_mosi, _spi_clk, MSBFIRST, B10010110);
   }
   else
   {
     digitalWrite(_spi_mosi, LOW); // Set MSB to LOW
+    digitalWrite(_spi_clk, LOW); // Clock Pulse
+    digitalWrite(_spi_clk, HIGH);
+    digitalWrite(_spi_clk, LOW);
   }
-  // Clock Pulse
-  digitalWrite(_spi_clk, LOW);
-  digitalWrite(_spi_clk, HIGH);
-  digitalWrite(_spi_clk, LOW);
   SPI.begin();
 }
 
 int TLC5955::updateLeds(double* output_current)
 {
-  uint8_t color_channel_ordered;
+
   double power_output_amps = getTotalCurrent();
   if (output_current != nullptr)
   {
@@ -213,14 +202,15 @@ int TLC5955::updateLeds(double* output_current)
   {
     setControlModeBit(CONTROL_MODE_OFF);
     SPI.beginTransaction(mSettings);
+    uint8_t color_channel_ordered;
     for (int8_t led_channel_index = (int8_t)LEDS_PER_CHIP - 1; led_channel_index >= 0; led_channel_index--)
     {
       for (int8_t color_channel_index = (int8_t)COLOR_CHANNEL_COUNT - 1; color_channel_index >= 0; color_channel_index--)
       {
         color_channel_ordered = _rgb_order[chip][led_channel_index][(uint8_t) color_channel_index];
-        SPI.transfer16(
-            _grayscale_data[chip][led_channel_index][color_channel_ordered]
-        );
+
+        SPI.transfer((char)(_grayscale_data[chip][led_channel_index][color_channel_ordered] >> 8)); // Output MSB first
+        SPI.transfer((char)(_grayscale_data[chip][led_channel_index][color_channel_ordered] & 0xFF)); // Followed by LSB
       }
     }
     SPI.endTransaction();
@@ -235,12 +225,13 @@ void TLC5955::clearLeds()
     for (int16_t chip = (int8_t)_tlc_count - 1; chip >= 0; chip--)
   {
     setControlModeBit(CONTROL_MODE_OFF);
-    SPI.beginTransaction(mSettings);
+    SPI.beginTransaction(SPISettings(spi_baud_rate, MSBFIRST, SPI_MODE0));
     for (int8_t led_channel_index = (int8_t)LEDS_PER_CHIP - 1; led_channel_index >= 0; led_channel_index--)
     {
       for (int8_t color_channel_index = (int8_t)COLOR_CHANNEL_COUNT - 1; color_channel_index >= 0; color_channel_index--)
       {
-        SPI.transfer16(0);
+        SPI.transfer((char) (uint16_t) 0); // Output MSB first
+        SPI.transfer((char) (uint16_t) 0); // Followed by LSB
       }
     }
     SPI.endTransaction();
@@ -325,26 +316,17 @@ void TLC5955::setFunctionData(bool DSPRPT, bool TMGRST, bool RFRESH, bool ESPWM,
 
 double TLC5955::getTotalCurrent()
 {
-  uint32_t totalCurrent_channel[COLOR_CHANNEL_COUNT];
-  for (uint8_t color_channel_index = 0; color_channel_index < COLOR_CHANNEL_COUNT; color_channel_index++)
-      totalCurrent_channel[color_channel_index] = 0;
-
+  double totalCurrent = 0;
   for (uint8_t color_channel_index = 0; color_channel_index < COLOR_CHANNEL_COUNT; color_channel_index++)
   {
-    for (uint8_t chip = 0; chip < _tlc_count; chip++)
-      for (uint8_t led_channel_index = 0; led_channel_index < LEDS_PER_CHIP; led_channel_index++)
-        totalCurrent_channel[color_channel_index] += _grayscale_data[chip][led_channel_index][color_channel_index];
-  }
-  // Avoid expensive floating point computation and compute the totalCurrent
-  // once, after the inexpensive integer computation has been done
-  // https://www.ti.com/lit/ds/symlink/tlc5955.pdf
-  // Page 17 (Equation 1)
-  double totalCurrent = 0;
-  for (uint8_t color_channel_index = 0; color_channel_index < COLOR_CHANNEL_COUNT; color_channel_index++){
+    // https://www.ti.com/lit/ds/symlink/tlc5955.pdf?ts=1636036806528&ref_url=https%253A%252F%252Fwww.google.com%252F
+    // Page 17 (Equation 1)
     double current = maxCurrentValues[_MC[color_channel_index]]
                     * (0.1 + 0.9 * _BC[color_channel_index] / 127)
                     * (0.262 + 0.738 * _DC[color_channel_index] / 127);
-    totalCurrent += totalCurrent_channel[color_channel_index] * current / (0xFFFF);
+    for (uint8_t chip = 0; chip < _tlc_count; chip++)
+      for (uint8_t led_channel_index = 0; led_channel_index < LEDS_PER_CHIP; led_channel_index++)
+        totalCurrent += current * _grayscale_data[chip][led_channel_index][color_channel_index] / 65535;
   }
   return totalCurrent;
 }
@@ -438,7 +420,6 @@ void TLC5955::getDotCorrection(uint8_t* dotCorrection)
 // Update the Control Register (changes settings)
 void TLC5955::updateControl()
 {
-  ssize_t a;
   for (int8_t repeatCtr = 0; repeatCtr < CONTROL_WRITE_COUNT; repeatCtr++)
   {
     for (int8_t chip = _tlc_count - 1; chip >= 0; chip--)
@@ -446,49 +427,36 @@ void TLC5955::updateControl()
       _buffer_count = 7;
       setControlModeBit(CONTROL_MODE_ON);
 
-
-      SPI.beginTransaction(mSettings);
-      // See Datasheet Figure 23 on Page 21
-      // https://www.ti.com/lit/ds/symlink/tlc5955.pdf
-      //  > DC, MC, BC, FC data writes are selected when the MSB[1:9] bits are 96h (HLLHLHHL)
-      //  MSB[0] is written in the setControlModeBit routine
-      SPI.transfer(B10010110);
       // Add CONTROL_ZERO_BITS blank bits to get to correct position for DC/FC
-      for (a = 0; a + 16 < CONTROL_ZERO_BITS; a = a + 16)
-          SPI.transfer16(0);
-
-      for (; a < CONTROL_ZERO_BITS; a++)
+      for (int16_t a = 0; a < CONTROL_ZERO_BITS; a++)
         setBuffer(0);
       // 5-bit Function Data
-      for (a = FC_BITS - 1; a >= 0; a--)
+      for (int8_t a = FC_BITS - 1; a >= 0; a--)
         setBuffer((_function_data & (1 << a)));
-
       // Brightness Control Data
-      for (a = BC_BITS - 1; a >= 0; a--)
+      for (int8_t a = BC_BITS - 1; a >= 0; a--)
         setBuffer((_BC[2] & (1 << a)));
-      for (a = BC_BITS - 1; a >= 0; a--)
+      for (int8_t a = BC_BITS - 1; a >= 0; a--)
         setBuffer((_BC[1] & (1 << a)));
-      for (a = BC_BITS - 1; a >= 0; a--)
+      for (int8_t a = BC_BITS - 1; a >= 0; a--)
         setBuffer((_BC[0] & (1 << a)));
-
       // Maximum Current Data
-      for (a = MC_BITS - 1; a >= 0; a--)
+      for (int8_t a = MC_BITS - 1; a >= 0; a--)
         setBuffer((_MC[2] & (1 << a)));
-      for (a = MC_BITS - 1; a >= 0; a--)
+      for (int8_t a = MC_BITS - 1; a >= 0; a--)
         setBuffer((_MC[1] & (1 << a)));
-      for (a = MC_BITS - 1; a >= 0; a--)
+      for (int8_t a = MC_BITS - 1; a >= 0; a--)
         setBuffer((_MC[0] & (1 << a)));
 
       // Dot Correction Data
-      for (a = LEDS_PER_CHIP - 1; a >= 0; a--)
+      for (int8_t a = LEDS_PER_CHIP - 1; a >= 0; a--)
       {
         for (int8_t b = COLOR_CHANNEL_COUNT - 1; b >= 0; b--)
         {
-          for (int8_t c = DC_BITS - 1; c >= 0; c--)
+          for (int8_t c = 6; c >= 0; c--)
             setBuffer(_DC[b] & (1 << c));
         }
       }
-      SPI.endTransaction();
     }
     latch();
   }
@@ -520,10 +488,12 @@ void TLC5955::setBuffer(uint8_t bit)
 {
   bitWrite(_buffer, _buffer_count, bit);
   _buffer_count--;
+  SPI.beginTransaction(mSettings);
   if (_buffer_count == -1)
   {
     SPI.transfer(_buffer);
     _buffer_count = 7;
     _buffer = 0;
   }
+  SPI.endTransaction();
 }
