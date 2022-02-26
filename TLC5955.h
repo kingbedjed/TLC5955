@@ -47,10 +47,8 @@ void deallocate();
 /* Setting individual LED intensities */
 void setAllLed(uint16_t gsvalue);
 void setAllLedRgb(uint16_t red, uint16_t green, uint16_t blue);
-void setLed(uint16_t led_number, uint16_t red, uint16_t green, uint16_t blue);
-void setLed(uint16_t led_number, uint16_t rgb);
-void setLedAppend(uint16_t led_number, uint16_t red, uint16_t green, uint16_t blue);
-void setChannel(uint16_t channel_number, uint16_t value);
+void setLed(int led_number, uint16_t red, uint16_t green, uint16_t blue);
+void setLed(int led_number, uint16_t rgb);
 
 /* Get LED Intensities */
 uint16_t getChannelValue(uint16_t channelNum, int color_channel_index);
