@@ -40,7 +40,6 @@
 #define CONTROL_ZERO_BITS 389   /* Bits required for correct control reg size */
 #define TOTAL_REGISTER_SIZE 76
 #define LATCH_DELAY 1
-#define CONTROL_WRITE_COUNT 2
 #define CONTROL_MODE_ON 1
 #define CONTROL_MODE_OFF 0
 
@@ -177,20 +176,16 @@ void TLC5955::setControlModeBit(bool is_control_mode)
   {
     // Manually Write control sequence
     digitalWrite(_spi_mosi, HIGH);          // Set MSB to HIGH
-    digitalWrite(_spi_clk, LOW);                  // Clock
-    // Pulse
-    digitalWrite(_spi_clk, HIGH);
-    digitalWrite(_spi_clk, LOW);
-    // see datasheet HLLHLHHL
-    shiftOut(_spi_mosi, _spi_clk, MSBFIRST, B10010110);
   }
   else
   {
     digitalWrite(_spi_mosi, LOW); // Set MSB to LOW
-    digitalWrite(_spi_clk, LOW); // Clock Pulse
-    digitalWrite(_spi_clk, HIGH);
-    digitalWrite(_spi_clk, LOW);
   }
+  digitalWrite(_spi_clk, LOW);                  // Clock
+  // Pulse
+  digitalWrite(_spi_clk, HIGH);
+  digitalWrite(_spi_clk, LOW);
+
   SPI.begin();
 }
 
@@ -409,46 +404,89 @@ void TLC5955::getDotCorrection(uint8_t* dotCorrection)
   dotCorrection[2] = _DC[2];
 }
 
+#ifdef KINETISK
+#define SPI_CTAR_FMSZ_MASK (0xF << 27)
+#define SPI_CTAR_FMSZ_MASK_NOT (0xFFFF'FFFF & (~SPI_CTAR_FMSZ_MASK))
+#endif
+
 // Update the Control Register (changes settings)
-void TLC5955::updateControl()
+void TLC5955::updateControl(int repeat)
 {
-  for (int8_t repeatCtr = 0; repeatCtr < CONTROL_WRITE_COUNT; repeatCtr++)
+  int a;
+#ifdef KINETISK
+  uint32_t old_ctar0;
+#endif
+
+  for (int repeatCtr = 0; repeatCtr < repeat; repeatCtr++)
   {
-    for (int8_t chip = _tlc_count - 1; chip >= 0; chip--)
+    for (int chip = _tlc_count - 1; chip >= 0; chip--)
     {
       _buffer_count = 7;
       setControlModeBit(CONTROL_MODE_ON);
+      SPI.beginTransaction(mSettings);
+#ifdef KINETISK
+      // Get the old ctar0 (associated with SPI.transfer
+      // after we have setup the transaction
+      old_ctar0 = KINETISK_SPI0.CTAR0;
+#endif
+      // Table 23
+      // DC, MC, BC, FC data writes are selected when the MSB[1:9] bits are 96h (HLLHLHHL).
+      //            HLLHLHHL
+      SPI.transfer(B10010110);
 
       // Add CONTROL_ZERO_BITS blank bits to get to correct position for DC/FC
-      for (int16_t a = 0; a < CONTROL_ZERO_BITS; a++)
+      for (a = 0; a + 16 < CONTROL_ZERO_BITS; a = a + 16)
+          SPI.transfer16(0);
+
+      for (; a < CONTROL_ZERO_BITS; a++)
         setBuffer(0);
       // 5-bit Function Data
-      for (int8_t a = FC_BITS - 1; a >= 0; a--)
+      for (a = FC_BITS - 1; a >= 0; a--)
         setBuffer((_function_data & (1 << a)));
       // Brightness Control Data
-      for (int8_t a = BC_BITS - 1; a >= 0; a--)
+      for (a = BC_BITS - 1; a >= 0; a--)
         setBuffer((_BC[2] & (1 << a)));
-      for (int8_t a = BC_BITS - 1; a >= 0; a--)
+      for (a = BC_BITS - 1; a >= 0; a--)
         setBuffer((_BC[1] & (1 << a)));
-      for (int8_t a = BC_BITS - 1; a >= 0; a--)
+      for (a = BC_BITS - 1; a >= 0; a--)
         setBuffer((_BC[0] & (1 << a)));
       // Maximum Current Data
-      for (int8_t a = MC_BITS - 1; a >= 0; a--)
+      for (a = MC_BITS - 1; a >= 0; a--)
         setBuffer((_MC[2] & (1 << a)));
-      for (int8_t a = MC_BITS - 1; a >= 0; a--)
+      for (a = MC_BITS - 1; a >= 0; a--)
         setBuffer((_MC[1] & (1 << a)));
-      for (int8_t a = MC_BITS - 1; a >= 0; a--)
+      for (a = MC_BITS - 1; a >= 0; a--)
         setBuffer((_MC[0] & (1 << a)));
 
       // Dot Correction Data
-      for (int8_t a = LEDS_PER_CHIP - 1; a >= 0; a--)
+#ifdef KINETISK
+      // This optimization only works because the number of bits in the buffer
+      // amounts to exactly a multiple of 8 bits
+      // Assume we are using SPI0
+      // Of the 769 bits to send, there are exactly
+      // 48 * 7 bits to send, == 336 == 42 * 8
+      // Therefore setBuffer would have flushed the bits in the transaction
+      // Send DC_BITS (7) bits at once
+      KINETISK_SPI0.CTAR0 = (old_ctar0 & SPI_CTAR_FMSZ_MASK_NOT) | SPI_CTAR_FMSZ(DC_BITS-1);
+      for (a = LEDS_PER_CHIP - 1; a >= 0; a--)
       {
-        for (int8_t b = COLOR_CHANNEL_COUNT - 1; b >= 0; b--)
+        for (int b = COLOR_CHANNEL_COUNT - 1; b >= 0; b--)
         {
-          for (int8_t c = 6; c >= 0; c--)
+          SPI.transfer(_DC[b]);
+        }
+      }
+      KINETISK_SPI0.CTAR0 = old_ctar0;
+#else
+      for (a = LEDS_PER_CHIP - 1; a >= 0; a--)
+      {
+        for (int b = COLOR_CHANNEL_COUNT - 1; b >= 0; b--)
+        {
+          for (int c = 6; c >= 0; c--)
             setBuffer(_DC[b] & (1 << c));
         }
       }
+#endif
+      SPI.endTransaction();
     }
     latch();
   }
@@ -480,12 +518,10 @@ void TLC5955::setBuffer(uint8_t bit)
 {
   bitWrite(_buffer, _buffer_count, bit);
   _buffer_count--;
-  SPI.beginTransaction(mSettings);
   if (_buffer_count == -1)
   {
     SPI.transfer(_buffer);
     _buffer_count = 7;
     _buffer = 0;
   }
-  SPI.endTransaction();
 }

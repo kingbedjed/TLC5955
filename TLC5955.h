@@ -77,7 +77,7 @@ void setControlModeBit(bool isControlMode);
 int updateLeds(double* output_current);
 void clearLeds();
 void latch();
-void updateControl();
+void updateControl(int repeat);
 void setSpiBaudRate(uint32_t new_baud_rate);
 uint32_t getSpiBaudRate();
 
